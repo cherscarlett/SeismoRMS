@@ -9,6 +9,9 @@ import pandas as pd
 import numpy as np
 from obspy import UTCDateTime
 
+# For logo
+import urllib.request
+
 # For pqlx
 import subprocess,sys
 
@@ -723,9 +726,11 @@ def plot(displacement_RMS,
             
             for o in data:
                 rs = data[o].copy().between_time("6:00", "16:00")
-                rs = rs.resample("1D" ).median().tshift(12, "H")
+                rs = rs.resample("1D" ).median()
+                if hasattr(rs, 'tshift'):
+                    rs.tshift(12, "H")
                 plt.plot(rs.index, rs,
-                         label="$\overline{%s}$ (6h-16h)"%o)#, c='purple')
+                    label="$\overline{%s}$ (6h-16h)"%o)#, c='purple')
 
             
 
