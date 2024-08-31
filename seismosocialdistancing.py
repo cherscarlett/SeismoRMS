@@ -9,9 +9,6 @@ import pandas as pd
 import numpy as np
 from obspy import UTCDateTime
 
-# For logo
-import urllib.request
-
 # For pqlx
 import subprocess,sys
 
