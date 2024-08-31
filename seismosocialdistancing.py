@@ -603,6 +603,7 @@ def clock24_plot_commons(ax,unit='nm'):
     # Set the circumference labels
     ax.set_xticks(np.linspace(0, 2*np.pi, 24, endpoint=False))
     ax.set_xticklabels(["%i h"%i for i in range(24)], fontsize=8)
+    ax.set_yticks(ax.get_yticks())
     ax.set_yticklabels(["%.2g %s" %(i,unit) for i in ax.get_yticks()], fontsize=7)
     ax.yaxis.set_tick_params(labelsize=8)
     ax.set_rlabel_position(0)
