@@ -1,12 +1,16 @@
 #!/usr/bin/python3
+# Updated by Cher Scarlett @cherscarlett for Python 3.12+: compatibility changes are marked "Py3.12+", bug fixes "Fix:"
+# Originally authored by Thomas Lecocq @seismotom and Fred Massin @fmassin
+
 from obspy.clients.fdsn import Client
-import matplotlib,imp
+import matplotlib  # Py3.12+: removed "imp" (the module no longer exists)
 # to edit text in Illustrator
 matplotlib.rcParams['pdf.fonttype'] = 42
 
 import tqdm
 import pandas as pd
 import numpy as np
+from scipy.integrate import trapezoid  # Py3.12+: replaces np.trapz (removed in NumPy 2.4)
 from obspy import UTCDateTime
 
 # For pqlx
@@ -22,6 +26,11 @@ import matplotlib.patheffects as pe
 import os
 import datetime
 import textwrap
+import io  # Py3.12+: io, urllib and PIL are used by read_logo()
+import urllib.parse
+import urllib.request
+import warnings
+from PIL import Image
 wrapper = textwrap.TextWrapper(width=15,break_long_words=False)
 # For maps
 #import cartopy.crs as ccrs
@@ -237,8 +246,8 @@ class PSDs(object):
             for fmin, fmax in freqs:
                 ix = np.where((f<=fmax) & (f>=fmin))
                 # Parseval: the RMS in time domain is the sqrt of the integral of the power spectrum
-                rms = np.sqrt(np.trapz(damp[ix], 
-                                       f[ix]))
+                rms = np.sqrt(trapezoid(damp[ix],  # Py3.12+: was np.trapz
+                                        f[ix]))
                 frange = "%.1f-%.1f"%(fmin, fmax)
                 if rms>0:
                     dRMS[frange] = rms
@@ -251,7 +260,7 @@ class PSDs(object):
             self.displacement_RMS[mseedid] = pd.DataFrame(displacement_RMS[mseedid],index=index)
 
 def dfrms(a):
-    return np.sqrt(np.trapz(a.values, a.index))
+    return np.sqrt(trapezoid(a.values, a.index.to_numpy()))  # Py3.12+: was np.trapz
 
 def df_rms(d, freqs, output="VEL"):
     d = d.dropna(axis=1, how='all')
@@ -417,7 +426,8 @@ def sitemap(mseedid,
 
 def pivot_for_hourmap(data, columns="angles"):
     band = data.columns[0]
-    data["day"] = [d.year * 365 + d.dayofyear for d in data.index]
+    # Fix: calendar days (year*365 + dayofyear repeated a number after leap years)
+    data["day"] = (data.index.normalize() - data.index[0].normalize()).days
     data["time"] = [d.hour + d.minute / 60. for d in data.index]
 
     data = data.pivot(index="day", columns="time", values=band)
@@ -489,12 +499,14 @@ def hourmap(data,
     ax.set_rmax(max(Y))
 
     if bans is not None:
-        rticks = [((UTCDateTime(ban).datetime - origin_time.to_pydatetime()).days) for iban, ban in enumerate(bans.keys())]
+        # Fix: ring of the ban's calendar day (bans on the first day are kept)
+        rticks = [(pd.Timestamp(UTCDateTime(ban).datetime).normalize() - origin_time.normalize()).days
+                  for ban in bans.keys()]
         xticks = [(UTCDateTime(ban).datetime.hour/24+UTCDateTime(ban).datetime.minute/60/24)*np.pi*2 for iban,ban in enumerate(bans.keys())]
         labels = [bans[iban] for iban in bans.keys()]
-        xticks = [xticks[i] for i,d in enumerate(rticks) if d>0]
-        labels = [labels[i] for i,d in enumerate(rticks) if d>0]
-        rticks = [d for d in rticks if d>0]
+        xticks = [xticks[i] for i,d in enumerate(rticks) if d>=0]
+        labels = [labels[i] for i,d in enumerate(rticks) if d>=0]
+        rticks = [d for d in rticks if d>=0]
         ax.set_rticks(rticks)
         for x,r,l,c in zip(xticks,
                            rticks,
@@ -508,11 +520,12 @@ def hourmap(data,
                                   pe.withStroke(linewidth=3,
                                                 foreground='k')])
 
-    plt.legend(loc='lower left',
-               bbox_to_anchor= (0.0, -0.2), 
-               ncol=2,
-               borderaxespad=0, 
-               frameon=False)
+    if ax.get_legend_handles_labels()[0]:  # Fix: no empty legend without bans
+        plt.legend(loc='lower left',
+                   bbox_to_anchor= (0.0, -0.2), 
+                   ncol=2,
+                   borderaxespad=0, 
+                   frameon=False)
 
     return ax
 
@@ -585,11 +598,13 @@ def gridmap(data,
                                   pe.withStroke(linewidth=3,
                                                 foreground='k')])
 
-    plt.legend(loc='lower left',
-               bbox_to_anchor= (0.0, -0.2),
-               ncol=2,
-               borderaxespad=0,
-               frameon=False)
+    ax.set_xlim(X[0], X[-1])  # Fix: bans outside the data don't stretch the axis
+    if ax.get_legend_handles_labels()[0]:  # Fix: no empty legend without bans
+        plt.legend(loc='lower left',
+                   bbox_to_anchor= (0.0, -0.2),
+                   ncol=2,
+                   borderaxespad=0,
+                   frameon=False)
     plt.gcf().autofmt_xdate()
     return ax
 
@@ -597,14 +612,19 @@ days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday','Saturday','Sunda
 # Just a bunch of helper functions
 def stack_wday_time(df,scale):
     """Takes a DateTimeIndex'ed DataFrame and returns the unstaked table: hours vs day name"""
-    return df.groupby(level=(0,1)).median().unstack(level=-1).T.droplevel(0)[days]*scale
+    table = df.groupby(level=(0,1)).median().unstack(level=-1).T.droplevel(0)
+    missing = [d for d in days if d not in table.columns]
+    if missing:  # Fix: warn instead of raising a KeyError
+        warnings.warn("No data on %s on one side of the last ban date; use at least a "
+                      "full week before and after it." % ", ".join(missing), stacklevel=2)
+    return table.reindex(columns=days)*scale
 
 def clock24_plot_commons(ax,unit='nm'):
     # Set the circumference labels
     ax.set_xticks(np.linspace(0, 2*np.pi, 24, endpoint=False))
     ax.set_xticklabels(["%i h"%i for i in range(24)], fontsize=8)
-    ax.set_yticks(ax.get_yticks())
-    ax.set_yticklabels(["%.2g %s" %(i,unit) for i in ax.get_yticks()], fontsize=7)
+    # Py3.12+: a formatter instead of set_yticklabels (Matplotlib warning). Fix: %g, not %.2g
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda r, pos: "%g %s" % (r, unit)))
     ax.yaxis.set_tick_params(labelsize=8)
     ax.set_rlabel_position(0)
 
@@ -623,6 +643,20 @@ def radial_hours(N):
 
 def localize_tz_and_reindex(df, freq="15Min", time_zone = "Europe/Brussels"):
     return df.copy().tz_localize("UTC").dropna().tz_convert(time_zone).tz_localize(None).resample(freq).mean().to_frame()
+
+def read_logo(logo):
+    # Py3.12+: plt.imread no longer accepts URLs, so URLs are downloaded here
+    try:
+        if urllib.parse.urlparse(str(logo)).scheme in ("http", "https"):
+            request = urllib.request.Request(
+                logo, headers={"User-Agent": "SeismoRMS-notebook/1.0 (educational use)"})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return np.asarray(Image.open(io.BytesIO(response.read())).convert("RGBA"))
+        return plt.imread(logo)
+    except Exception as err:
+        warnings.warn("Could not load logo %r (%s); plotting without it." % (logo, err),
+                      stacklevel=2)
+        return None
     
 def plot(displacement_RMS,
          band = "4.0-14.0",
@@ -642,6 +676,10 @@ def plot(displacement_RMS,
          ):
     if save is not None and not os.path.isdir(save):
         os.makedirs(save)
+    # Fix: band, bans and sitedesc may be None, as the notebook's comments say
+    band = band or "4.0-14.0"
+    bans = bans or {}
+    sitedesc = sitedesc or ""
 
     for channelcode in list(set([k[:-1] for k in displacement_RMS])):
         
@@ -654,23 +692,17 @@ def plot(displacement_RMS,
             main=channelcode[-2:]+o
             
         if len(data.keys())>1:
-            data[channelcode[-2:]+'*'] = data[main].copy().resample("30min").median().tshift(30, "min") # for the sum
+            # Py3.12+: tshift was removed (pandas 2.0) and integer keys on a DatetimeIndex
+            # fail (pandas 3); the components are now summed on matching time stamps
+            components = list(data)
+            for o in components:
+                data[o] = data[o].resample("30min").median().shift(30, freq="min")
             main=channelcode[-2:]+'*'
-            for i,t in enumerate(data[main].index):
-                data[main][i] = 0
-            for o in data:
-                if o == main:
-                    continue
-                data[o] = data[o].copy().resample("30min" ).median().tshift(30, "min")
-                for i,t in enumerate(data[main].index):
-                    if len(data[o].index)-1<i:
-                        break
-                    if True:#abs(data[o].index[i].timestamp()-data[main].index[i].timestamp())<60:
-                        data[main][i] += data[o][i]**2
-            for i,t in enumerate(data[main].index):
-                data[main][i] = data[main][i]**.5
+            squares = pd.concat({o: data[o]**2 for o in components}, axis=1)
+            data[main] = (squares.sum(axis=1, min_count=len(components))**.5).rename(band)
 
-        data[main] = localize_tz_and_reindex(data[main], "30Min", time_zone = time_zone)
+        for o in data:  # Fix: every trace in local time (components stayed in UTC)
+            data[o] = localize_tz_and_reindex(data[o], "30Min", time_zone = time_zone)
         basename = "%s%s-%s"%(save,
                               channelcode[:]+main[-1],
                               band)
@@ -687,7 +719,7 @@ def plot(displacement_RMS,
                                 
         if type in ['*', 'all', 'clockmaps']:
             ax = hourmap(data[main],
-                         bans=bans,
+                         bans=bans or None,
                          scale=scale,
                          unit=unit)
             title = 'Seismic Noise for %s - Filter: [%s] Hz' % (channelcode[:]+main[-1],band)
@@ -701,7 +733,7 @@ def plot(displacement_RMS,
 
         if type in ['*', 'all', 'gridmaps']:
             ax = gridmap(data[main],
-                         bans=bans,
+                         bans=bans or None,
                          scale=scale,
                          unit=unit)
             title = 'Seismic Noise for %s - Filter: [%s] Hz' % (
@@ -717,18 +749,18 @@ def plot(displacement_RMS,
 
         if type in ['*', 'all', 'timeseries']:
             fig = plt.figure(figsize=(12,6))
-            if logo is not None:
-                fig.figimage(plt.imread(logo),
+            logo_image = read_logo(logo) if logo is not None else None  # Py3.12+: see read_logo()
+            if logo_image is not None:
+                fig.figimage(logo_image,
                              40, 40, alpha=.4, zorder=1)
             plt.plot(data[main].index, data[main], label = main)
             
             for o in data:
                 rs = data[o].copy().between_time("6:00", "16:00")
-                rs = rs.resample("1D" ).median()
-                if hasattr(rs, 'tshift'):
-                    rs.tshift(12, "H")
+                rs = rs.resample("1D" ).median().shift(12, freq="h")  # Py3.12+: was .tshift(12, "H")
+                # Py3.12+: raw string label (avoids an invalid-escape SyntaxWarning)
                 plt.plot(rs.index, rs,
-                    label="$\overline{%s}$ (6h-16h)"%o)#, c='purple')
+                         label=r"$\overline{%s}$ (6h-16h)"%o)#, c='purple')
 
             
 
@@ -756,7 +788,7 @@ def plot(displacement_RMS,
                 plt.axvline(UTCDateTime(ban).datetime,
                             color='r',
                             linewidth=2,
-                            linestyle=['-', '--', '-.', ':'][iban],
+                            linestyle=['-', '--', '-.', ':'][iban % 4],  # Fix: more than 4 bans
                             path_effects=[pe.withStroke(linewidth=4, foreground="k")],
                             zorder=-9,
                             label='\n'.join(wrapper.wrap(bans[ban])))
@@ -775,9 +807,17 @@ def plot(displacement_RMS,
                 plt.show()
         
         if type in ['*', 'all', 'clockplots', 'dailyplots']:
-            preloc = data[main].loc[:max(list(bans.keys()))]
+            # Fix: split at the parsed last ban date (the split sample was in both periods)
+            if not bans:
+                raise ValueError("clockplots and dailyplots compare the data before and after "
+                                 "the last date in `bans`, so they need at least one ban date.")
+            split = max(pd.Timestamp(UTCDateTime(ban).datetime) for ban in bans)
+            preloc = data[main].loc[data[main].index < split]
+            if not len(preloc):
+                raise ValueError("No data before the last ban date (%s); clockplots and "
+                                 "dailyplots need data on both sides of it." % split)
             preloc = preloc.set_index([preloc.index.day_name(), preloc.index.hour+preloc.index.minute/60.])
-            postloc = data[main].loc[max(list(bans.keys())):]
+            postloc = data[main].loc[data[main].index >= split]
             postloc = postloc.set_index([postloc.index.day_name(), postloc.index.hour+postloc.index.minute/60.])
             cmap = plt.get_cmap("tab20")
 
@@ -790,7 +830,7 @@ def plot(displacement_RMS,
                 plt.ylabel("Amplitude (%s)"%unit)
                 plt.xlabel("Hour of day (local time)")
                 plt.grid()
-                plt.xlim(0,23)
+                plt.xlim(0,23.5)  # Fix: show the 23:30 sample
                 plt.ylim(0,np.nanpercentile(data[main],95)*1.5*scale)
                 if save is not None:
                     ax.figure.savefig("%s-daily.%s"%(basename,format),
@@ -817,8 +857,6 @@ def plot(displacement_RMS,
     
                 plt.title("Before Lockdown", fontsize=12)
                 clock24_plot_commons(ax,unit=unit)#es[0])
-                ax.set_rmax(np.nanpercentile(data[main],95)*1.5*scale)
-                ax.set_rmin(0)
                 ax = plt.subplot(122, polar=True, sharey=ax)
                 if len(postloc):
                     _ = stack_wday_time(postloc,scale).copy()
@@ -830,6 +868,8 @@ def plot(displacement_RMS,
                 plt.title("After Lockdown", fontsize=12)
                 clock24_plot_commons(ax,unit=unit)#es[0])
                 # ax.set_rmax(np.nanpercentile(data[main],95)*1.5*scale)
+                # Fix: shared radial range, set after both panels are drawn
+                ax.set_ylim(0, np.nanpercentile(data[main],95)*1.5*scale)
                 
                 suptitle = "Day/Hour Median Noise levels %s\n"
                 suptitle += "Station %s - [%s] Hz"
@@ -1007,5 +1047,3 @@ if __name__ == "__main__":
                 show=args.show,
                 format=args.extension,
                 )
-
-
