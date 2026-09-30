@@ -1,3 +1,7 @@
+# This fork updates the python to be compatible with Python 3.12+ due to the use of `imp`, which was removed.
+
+Author: Cher Scarlett
+
 # Ground Motion Displacement RMS vs Time
 
 *an example simple tutorial for getting seismic data, computing the power spectral densities, extracting the RMS and plotting*
